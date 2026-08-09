@@ -13,6 +13,7 @@ module.exports = async function() {
   const configBackupPath = `${configPath}.test-backup`;
   fs.copyFileSync(configPath, configBackupPath);
   const testConfig = fs.readFileSync(configPath, 'utf8')
+    .replace(/^\s*root\s*=\s*false\s*$/m, 'root = true')
     .replace(/^\s*headless\s*=\s*false\s*$/m, '    headless = true')
     .replace(/^\s*concurrency\s*=\s*"necro"\s*$/m, '    concurrency = "browser"');
   fs.writeFileSync(configPath, testConfig);
