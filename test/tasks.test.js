@@ -207,8 +207,10 @@ describe('Necrobrowser Task Execution', () => {
       const queued = parseInt(statusData.queued);
       const workers = parseInt(statusData.workers);
 
-      // Should have either queued tasks or active workers
-      expect(queued + workers).toBeGreaterThan(0);
+      // Fast workers may have completed the task before this observation.
+      const taskResponse = await fetch(`${baseURL}/instrument/${taskId}`);
+      const taskData = await taskResponse.json();
+      expect(['queued', 'running', 'completed']).toContain(taskData.status);
 
       // Wait for completion
       await waitForTaskCompletion(taskId, 5000);

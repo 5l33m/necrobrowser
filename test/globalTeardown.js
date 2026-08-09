@@ -1,3 +1,6 @@
+const fs = require('fs');
+const path = require('path');
+
 module.exports = async function() {
   console.log('Global teardown: Cleaning up test environment...');
 
@@ -20,6 +23,13 @@ module.exports = async function() {
       // Process may have already terminated
       console.log('Process cleanup completed');
     }
+  }
+
+  const configPath = path.join(__dirname, '..', 'config.toml');
+  const configBackupPath = `${configPath}.test-backup`;
+  if (fs.existsSync(configBackupPath)) {
+    fs.copyFileSync(configBackupPath, configPath);
+    fs.unlinkSync(configBackupPath);
   }
 
   console.log('Global teardown complete');

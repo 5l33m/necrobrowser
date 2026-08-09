@@ -5,6 +5,13 @@ version = 1.0
 
 debug = false
 
+# Operator API authentication
+# Set this secret in the process environment before starting the service:
+#   export NECRO_API_TOKEN="a-long-random-value"
+# All endpoints except GET /healthz require:
+#   Authorization: Bearer <NECRO_API_TOKEN>
+# Do not place the token in this file.
+
 # Mark this as true if Necrobrowser is running as root or in test environments
 # NOTE: you should have a good reason to run it as root, beware of the yolo --no-sandbox --disable-setuid-sandbox
 root = false

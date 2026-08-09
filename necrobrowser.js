@@ -13,6 +13,7 @@ const logger = require('morgan');
 const c = require('chalk');
 const log = require('./lib/logger');
 const validation = require('./lib/validation');
+const auth = require('./lib/auth');
 
 // ============================================================================
 // Global Panic Handlers - Prevent crashes from uncaught errors
@@ -57,6 +58,9 @@ process.on('unhandledRejection', (reason, promise) => {
     console.log(`concurrency: [${cfg.cluster.concurrency}]   poolSize:   [${cfg.cluster.poolSize}]          taskTimeout: [${cfg.cluster.taskTimeout} sec]`);
     console.log(`headless:    [${cfg.necro.headless}]     windowSize: [${cfg.cluster.page.windowSize}]  scaleFactor: [${cfg.cluster.page.scaleFactor} sec]`);
 
+    // Fail closed: operator endpoints require a token before the service starts.
+    auth.requireConfiguredToken();
+
     // dynamically load all the available tasks
     let necrotask = loader.LoadTasks()
 
@@ -93,6 +97,12 @@ process.on('unhandledRejection', (reason, promise) => {
 
     app.use(logger('dev'));
     app.use(express.json());
+
+    // Health checks expose no task, session, or configuration data.
+    app.get('/healthz', (req, res) => res.status(200).json({ status: 'ok' }));
+
+    // All operator routes require a bearer token.
+    app.use(auth.requireBearerToken);
 
     // return status for now
     app.get('/', async function (req, res, next) {
