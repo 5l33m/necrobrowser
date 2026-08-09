@@ -33,6 +33,23 @@ In other words, NecroBrowser allows you to define your Puppeteer tasks in advanc
 which you can then call on a cluster of headless browsers, with persistence support via Redis.
 
 
+## API authentication
+
+Necrobrowser requires an API token at startup. Keep it in the process environment, never in `config.toml` or source control:
+
+```bash
+export NECRO_API_TOKEN="$(openssl rand -hex 32)"
+node necrobrowser.js
+```
+
+All operator routes require this header:
+
+```http
+Authorization: Bearer <NECRO_API_TOKEN>
+```
+
+`GET /healthz` is the only unauthenticated endpoint and returns no task or session data. Run the API behind a private network boundary or a TLS-terminating reverse proxy.
+
 ## Documentation
 
 That the project is documented at https://necrobrowser.phishing.click
