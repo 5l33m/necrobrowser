@@ -8,6 +8,15 @@ const TEST_API_TOKEN = 'test-only-necrobrowser-api-token';
 module.exports = async function() {
   console.log('Global setup: Starting test environment...');
 
+  // Use a CI-safe browser configuration without changing the tracked default.
+  const configPath = path.join(__dirname, '..', 'config.toml');
+  const configBackupPath = `${configPath}.test-backup`;
+  fs.copyFileSync(configPath, configBackupPath);
+  const testConfig = fs.readFileSync(configPath, 'utf8')
+    .replace(/^\s*headless\s*=\s*false\s*$/m, '    headless = true')
+    .replace(/^\s*concurrency\s*=\s*"necro"\s*$/m, '    concurrency = "browser"');
+  fs.writeFileSync(configPath, testConfig);
+
   // Ensure required directories exist and clean them
   const extrusionPath = path.join(__dirname, '..', 'extrusion');
   const profilesPath = path.join(__dirname, '..', 'profiles');
