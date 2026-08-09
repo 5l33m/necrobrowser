@@ -3,6 +3,8 @@ const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
+const TEST_API_TOKEN = 'test-only-necrobrowser-api-token';
+
 module.exports = async function() {
   console.log('Global setup: Starting test environment...');
 
@@ -39,7 +41,7 @@ module.exports = async function() {
     cwd: path.join(__dirname, '..'),
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: true,
-    env: { ...process.env, NODE_ENV: 'test' }
+    env: { ...process.env, NODE_ENV: 'test', NECRO_API_TOKEN: TEST_API_TOKEN }
   });
 
   // Save PID for cleanup
