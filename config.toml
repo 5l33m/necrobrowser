@@ -14,7 +14,7 @@ debug = false
 
 # Mark this as true if Necrobrowser is running as root or in test environments
 # NOTE: you should have a good reason to run it as root, beware of the yolo --no-sandbox --disable-setuid-sandbox
-root = false
+root = true
 
 [platform]
     # supported platforms: freebsd, linux, darwin
