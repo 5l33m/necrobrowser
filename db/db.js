@@ -21,6 +21,8 @@ async function getClient() {
         try {
             client = redis.createClient({
                 socket: {
+                    host: process.env.REDIS_HOST || "127.0.0.1",
+                    port: parseInt(process.env.REDIS_PORT, 10) || 6379,
                     reconnectStrategy: (retries) => {
                         if (retries > 10) {
                             console.error(c.red('[Redis] Max reconnection attempts reached'));
