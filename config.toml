@@ -14,7 +14,7 @@ debug = false
 
 # Mark this as true if Necrobrowser is running as root or in test environments
 # NOTE: you should have a good reason to run it as root, beware of the yolo --no-sandbox --disable-setuid-sandbox
-root = false
+root = true
 
 [platform]
     # supported platforms: freebsd, linux, darwin
@@ -69,7 +69,10 @@ root = false
     # non-headless means normal chromium GUI
     # in production, and in general unless you encouter headless bugs, you
     # should always use headless = true
-    headless = false
+    # The deployed container (ghcr.io/puppeteer/puppeteer base) has no X
+    # display / Xvfb, so headless=false stalls the puppeteer-cluster worker
+    # at browser launch and tasks sit "queued" forever. Must be true here.
+    headless = true
 
     # each submitted task is kept in redis, so we can keep the session
     # alive by just doing a GET on the task fixSession url
