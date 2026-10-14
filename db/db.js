@@ -23,7 +23,6 @@ async function getClient() {
                 socket: {
                     host: process.env.REDIS_HOST || "127.0.0.1",
                     port: parseInt(process.env.REDIS_PORT, 10) || 6379,
-                    password: process.env.REDIS_PASSWORD || undefined,
                     reconnectStrategy: (retries) => {
                         if (retries > 10) {
                             console.error(c.red('[Redis] Max reconnection attempts reached'));
@@ -33,7 +32,11 @@ async function getClient() {
                         console.log(c.yellow(`[Redis] Reconnecting in ${delay}ms... (attempt ${retries})`));
                         return delay;
                     }
-                }
+                },
+                // node-redis v4: `password` is a TOP-LEVEL option, not inside
+                // `socket`. (socket.password is silently ignored -> NOAUTH on
+                // every command.)
+                password: process.env.REDIS_PASSWORD || undefined,
             });
 
             // Error handler - prevents crashes on Redis errors

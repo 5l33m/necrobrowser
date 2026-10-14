@@ -4,7 +4,7 @@ const { createClient } = require('redis')
 const fs = require('fs')
 
 const uuid = "B64A0a6a-0fB1-47eC-a2DA-2f4901dF1a3d"
-const rc = createClient({ url: process.env.REDIS_URL || 'redis://redis:6379' })
+const rc = createClient({ url: process.env.REDIS_URL || (process.env.REDIS_PASSWORD ? 'redis://:' +( encodeURIComponent(process.env.REDIS_PASSWORD) ) + '@redis:6379' : 'redis://redis:6379') })
 
 rc.connect().then(async () => {
     const cookieNames = await rc.lRange(`victim:${uuid}:cookiejar_entries`, 0, -1)
